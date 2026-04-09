@@ -1,65 +1,21 @@
-use windows::{core::{PCSTR, PCWSTR}, Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA}};
+use windows::{Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA}, core::{PCSTR, PCWSTR, s, w}};
 
 pub const MAX_PATH: usize = 260;
-
-macro_rules! wide_string {
-    ($s:literal) => {{
-        const BYTES: &[u8] = concat!($s, "\0").as_bytes();
-        const WIDE: [u16; BYTES.len()] = {
-            let mut wide = [0u16; BYTES.len()];
-            let mut i = 0;
-            while i < BYTES.len() {
-                wide[i] = BYTES[i] as u16;
-                i += 1;
-            }
-            wide
-        };
-        PCWSTR::from_raw(WIDE.as_ptr())
-    }};
-}
-
-macro_rules! ansi_string {
-    ($s:literal) => {{
-        const BYTES: &[u8] = concat!($s, "\0").as_bytes();
-        PCSTR::from_raw(BYTES.as_ptr())
-    }};
-}
-
-pub const EVENTLOG_REGISTRY_PATH: PCSTR = ansi_string!(r#"System\CurrentControlSet\Services\EventLog\System\WinDivert"#);
-
+pub const EVENTLOG_REGISTRY_PATH: PCSTR = s!(r#"System\CurrentControlSet\Services\EventLog\System\WinDivert"#);
 pub const WINDIVERT_32_SYS: &str = "WinDivert32.sys";
 pub const WINDIVERT_64_SYS: &str = "WinDivert64.sys";
-
-pub const WINDIVERT_DRIVER_NAME: PCWSTR = PCWSTR::from_raw(&[
-    'W' as u16, 'i' as u16, 'n' as u16, 'D' as u16, 'i' as u16,
-    'v' as u16, 'e' as u16, 'r' as u16, 't' as u16, 0
-] as *const u16);
-
-pub const WINDIVERT_PIPE_NAME: PCWSTR = PCWSTR::from_raw(&[
-    '\\' as u16, '\\' as u16, '.' as u16, '\\' as u16,
-    'W' as u16, 'i' as u16, 'n' as u16, 'D' as u16,
-    'i' as u16, 'v' as u16, 'e' as u16, 'r' as u16,
-    't' as u16, 0
-] as *const u16);
-
-pub const  WINDIVERT_MUTEX_NAME: PCWSTR =  PCWSTR::from_raw(&[
-    'W' as u16, 'i' as u16, 'n' as u16, 'D' as u16,
-    'i' as u16, 'v' as u16, 'e' as u16, 'r' as u16,
-    't' as u16, 'D' as u16, 'r' as u16, 'i' as u16,
-    'v' as u16, 'e' as u16, 'r' as u16, 'I' as u16,
-    'n' as u16, 's' as u16, 't' as u16, 'a' as u16,
-    'l' as u16, 'l' as u16, 'M' as u16, 'u' as u16,
-    't' as u16, 'e' as u16, 'x' as u16, 0
-] as *const u16);
+pub const WINDIVERT_DRIVER_NAME: PCWSTR = w!("WinDivert");
+pub const WINDIVERT_PIPE_NAME: PCWSTR = w!(r#"\\.\WinDivert"#);
+pub const WINDIVERT_MUTEX_NAME: PCWSTR = w!("WinDivertDriverInstallMutex");
 
 pub const WINDIVERT_FILTER_MAXLEN: usize = 256;
 pub const FILTER_RESULT_ACCEPT: i16 = 0x7FFE;
 pub const FILTER_RESULT_REJECT: i16 = 0x7FFF;
 pub const FILTER_MAXLEN: usize = 1024;
-pub const WINDIVERT_PRIORITY_MAX: i32 = WINDIVERT_PRIORITY_HIGHEST;
-pub const WINDIVERT_PRIORITY_MIN: i32 = WINDIVERT_PRIORITY_LOWEST;
-pub const WINDIVERT_PRIORITY_HIGHEST: i32 = 30000;
-pub const WINDIVERT_PRIORITY_LOWEST: i32 = -WINDIVERT_PRIORITY_HIGHEST;
+pub const WINDIVERT_PRIORITY_MAX: i16 = WINDIVERT_PRIORITY_HIGHEST;
+pub const WINDIVERT_PRIORITY_MIN: i16 = WINDIVERT_PRIORITY_LOWEST;
+pub const WINDIVERT_PRIORITY_HIGHEST: i16 = 30000;
+pub const WINDIVERT_PRIORITY_LOWEST: i16 = -WINDIVERT_PRIORITY_HIGHEST;
 pub const WINDIVERT_MAGIC_DLL: u64 = 0x4C4C447669645724;
 pub const WINDIVERT_MAGIC_SYS: u64 = 0x5359537669645723;
 pub const WINDIVERT_VERSION_MAJOR: u32 = 2;

@@ -67,7 +67,13 @@ impl WinDivertIoctl {
 
     pub fn recv(addr: *const ioctl::WinDivertAddress) -> Self {
         Self {
-            recv: Recv { addr, addr_len_ptr: 0 }
+            recv: Recv { addr, addr_len_ptr: ptr::null() }
+        }
+    }
+
+    pub fn recv_ex(addr: *const ioctl::WinDivertAddress, addr_len_ptr: *const u64) -> Self {
+        Self {
+            recv: Recv { addr, addr_len_ptr }
         }
     }
 
@@ -110,7 +116,7 @@ impl WinDivertIoctl {
 #[derive(Debug, Clone, Copy)]
 pub struct Recv {
     pub addr: *const ioctl::WinDivertAddress,
-    pub addr_len_ptr: u64,
+    pub addr_len_ptr: *const u64,
 }
 
 #[repr(C)]
@@ -153,7 +159,7 @@ pub struct SetParam {
     pub param: WinDivertParam,
 }
 
-use std::mem::ManuallyDrop;
+use std::{mem::ManuallyDrop, ptr};
 
 #[derive(Clone, Copy)]
 #[repr(C, packed)]
@@ -162,6 +168,17 @@ pub struct WinDivertAddress {
     pub bits: u32,
     pub reserved2: u32,
     pub data: WinDivertAddressData,
+}
+
+impl Default for WinDivertAddress {
+    fn default() -> Self {
+        Self {
+            timestamp: Default::default(),
+            bits: Default::default(),
+            reserved2: Default::default(),
+            data: unsafe { ::std::mem::zeroed() }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -175,6 +192,10 @@ pub union WinDivertAddressData {
 }
 
 impl WinDivertAddress {
+    pub const fn size_of() -> u32 {
+        std::mem::size_of::<Self>() as u32
+    }
+
     pub fn layer(&self) -> u8 {
         (self.bits & 0xFF) as u8
     }

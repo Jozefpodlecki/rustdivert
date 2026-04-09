@@ -7,6 +7,8 @@ mod ioctl;
 mod constants;
 mod flags;
 mod misc;
+mod newtypes;
+mod builder;
 pub mod sync;
 pub mod async_windivert;
 

@@ -1,9 +1,35 @@
 use std::fmt;
 
+use crate::WinDivertAddress;
+
+pub struct WindivertOptions {
+    pub install_service_on_file_not_found: bool
+}
+
+impl Default for WindivertOptions {
+    fn default() -> Self {
+        Self {
+            install_service_on_file_not_found: Default::default()
+        }
+    }
+}
+
+pub struct WinDivertPacket {
+    pub received: u32,
+    pub address: WinDivertAddress,
+    pub data: Box<[u8]>,
+}
+
+pub struct WinDivertPacketBatch {
+    pub received: u32,
+    pub packets: Vec<WinDivertPacket>,
+}
 
 #[derive(Debug)]
 pub enum WinDivertError {
     InvalidParameter,
+    CouldNotLockForInstall,
+    Cancelled,
     BadObject,
     NoMemory,
     UnexpectedToken(usize),
@@ -12,9 +38,18 @@ pub enum WinDivertError {
     ParseError(usize),
     BadToken(usize),
     TooDeep(usize),
-    DeviceIoControl(u32),
-    File(u32),
+    CouldNotInitialize(u32),
+    CouldNotSend(u32),
+    CouldNotSetParam(u32),
+    CouldNotGetParam(u32),
+    CouldNotReceive(u32),
+    FileNotFound,
+    AccessDenied,
+    ServiceExists,
+    ServiceAlreadyRunning,
+    CorruptedService,
     CouldNotInstallService(u32),
+    CouldNotMarkServiceForDeletion(u32),
     Handle(u32)
 }
 
@@ -22,19 +57,81 @@ impl std::error::Error for WinDivertError {}
 impl std::fmt::Display for WinDivertError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WinDivertError::InvalidParameter => write!(f, "Invalid parameter"),
-            WinDivertError::BadObject => write!(f, "Bad object"),
-            WinDivertError::NoMemory => write!(f, "Out of memory"),
-            WinDivertError::CouldNotInstallService(code) => write!(f, "Could not install service {}", code),
-            WinDivertError::UnexpectedToken(pos) => write!(f, "Unexpected token at position {}", pos),
-            WinDivertError::TooLong => write!(f, "Data too long"),
-            WinDivertError::TokenizeError(pos) => write!(f, "Tokenization error at position {}", pos),
-            WinDivertError::ParseError(pos) => write!(f, "Parse error at position {}", pos),
-            WinDivertError::BadToken(pos) => write!(f, "Bad token at position {}", pos),
-            WinDivertError::TooDeep(pos) => write!(f, "Too deeply nested at position {}", pos),
-            WinDivertError::DeviceIoControl(code) => write!(f, "DeviceIoControl failed with code {}", code),
-            WinDivertError::File(code) => write!(f, "File operation failed with code {}", code),
-            WinDivertError::Handle(code) => write!(f, "Handle operation failed with code {}", code),
+            WinDivertError::InvalidParameter =>
+                write!(f, "Invalid parameter"),
+
+            WinDivertError::BadObject =>
+                write!(f, "Invalid or corrupted object"),
+
+            WinDivertError::NoMemory =>
+                write!(f, "Out of memory"),
+
+            WinDivertError::Cancelled =>
+                write!(f, "Operation was cancelled"),
+
+            WinDivertError::AccessDenied =>
+                write!(f, "Access denied (administrator privileges required)"),
+
+            WinDivertError::FileNotFound =>
+                write!(f, "WinDivert driver device not found (driver not installed?)"),
+
+            WinDivertError::CouldNotLockForInstall =>
+                write!(f, "Could not acquire installation mutex"),
+
+            // --- Parsing / filter errors ---
+            WinDivertError::UnexpectedToken(pos) =>
+                write!(f, "Unexpected token at position {}", pos),
+
+            WinDivertError::TooLong =>
+                write!(f, "Input too long"),
+
+            WinDivertError::TokenizeError(pos) =>
+                write!(f, "Tokenization error at position {}", pos),
+
+            WinDivertError::ParseError(pos) =>
+                write!(f, "Parse error at position {}", pos),
+
+            WinDivertError::BadToken(pos) =>
+                write!(f, "Invalid token at position {}", pos),
+
+            WinDivertError::TooDeep(pos) =>
+                write!(f, "Expression too deeply nested at position {}", pos),
+
+            // --- Driver / IOCTL errors ---
+            WinDivertError::CouldNotInitialize(code) =>
+                write!(f, "Failed to initialize WinDivert driver (code {})", code),
+
+            WinDivertError::CouldNotSend(code) =>
+                write!(f, "Failed to send packet via WinDivert (code {})", code),
+
+            WinDivertError::CouldNotReceive(code) =>
+                write!(f, "Failed to receive packet from WinDivert (code {})", code),
+
+            WinDivertError::CouldNotSetParam(code) =>
+                write!(f, "Failed to set WinDivert parameter (code {})", code),
+
+            WinDivertError::CouldNotGetParam(code) =>
+                write!(f, "Failed to get WinDivert parameter (code {})", code),
+
+            // --- Service / driver install errors ---
+            WinDivertError::ServiceExists =>
+                write!(f, "WinDivert service already exists"),
+
+            WinDivertError::ServiceAlreadyRunning =>
+                write!(f, "WinDivert service is already running"),
+
+            WinDivertError::CorruptedService =>
+                write!(f, "WinDivert service is corrupted or misconfigured"),
+
+            WinDivertError::CouldNotInstallService(code) =>
+                write!(f, "Failed to install/start WinDivert service (code {})", code),
+
+            WinDivertError::CouldNotMarkServiceForDeletion(code) =>
+                write!(f, "Failed to mark WinDivert service for deletion (code {})", code),
+
+            // --- Generic handle error ---
+            WinDivertError::Handle(code) =>
+                write!(f, "Win32 handle operation failed (code {})", code),
         }
     }
 }
@@ -47,6 +144,20 @@ pub enum WinDivertParam {
     QueueSize,
     VersionMajor,
     VersionMinor
+}
+
+impl fmt::Display for WinDivertParam {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            WinDivertParam::QueueLength => "Queue Length (packets)",
+            WinDivertParam::QueueTime   => "Queue Time (ms)",
+            WinDivertParam::QueueSize   => "Queue Size (bytes)",
+            WinDivertParam::VersionMajor => "Version Major",
+            WinDivertParam::VersionMinor => "Version Minor",
+        };
+
+        write!(f, "{s}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

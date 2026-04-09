@@ -2,7 +2,7 @@ use windows::{Win32::{Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, ERROR_S
 use windows::Win32::System::Threading::{GetCurrentProcess, IsWow64Process};
 use std::{ffi::OsStr, mem::{offset_of, size_of}, os::windows::ffi::OsStrExt};
 use log::*;
-use crate::{constants::*, filter::WinDivertFilterRaw, *};
+use crate::{constants::*, filter::WinDivertFilterRaw, newtypes::{CreateArgs, MutexHandle, ServiceManager}, *};
 
 pub const fn sanity_checks() -> bool {
     if size_of::<WinDivertAddress>() != 80 {
@@ -37,21 +37,7 @@ pub const fn sanity_checks() -> bool {
     true
 }
 
-fn win_divert_use_32_bit() -> bool {
-    if size_of::<usize>() == 8 {
-        return false;
-    }
-    
-    let mut is_wow64 = BOOL::default();
-    
-    unsafe {
-        let current_process = GetCurrentProcess();
-        match IsWow64Process(current_process, &mut is_wow64) {
-            Ok(_) => !is_wow64.as_bool(),
-            Err(_) => false,
-        }
-    }
-}
+
 
 fn win_divert_str_len(s: &[u16], maxlen: usize) -> Option<usize> {
     let len = s.iter()
@@ -65,213 +51,62 @@ fn win_divert_str_len(s: &[u16], maxlen: usize) -> Option<usize> {
     }
 }
 
-fn win_divert_get_driver_file_name() -> Option<PCWSTR> {
-    let is_32bit = win_divert_use_32_bit();
-    
-    let driver_name = if is_32bit {
-        WINDIVERT_32_SYS
-    } else {
-        WINDIVERT_64_SYS
-    };
-    
-    // let exe_path = std::env::current_exe().ok()?;
-    // let dir_path = exe_path.parent()?;
-    // let driver_path = dir_path.join(driver_name);
-    
-    let driver_path_wide: Vec<u16> = OsStr::new(&driver_name)
-        .encode_wide()
-        .chain(Some(0))
-        .collect();
-    let driver_name = PCWSTR::from_raw(driver_path_wide.as_ptr());
-
-    Some(driver_name)
-}
-
-pub fn try_install_driver() -> windows::core::Result<bool> {
-    
-    debug!("Trying to install driver");
-
-    let handle = unsafe {
-        CreateMutexW(None, false, WINDIVERT_MUTEX_NAME)?
-    };
-
-    if handle.is_invalid() {
-        return Ok(false)
-    }
-
-    match unsafe { WaitForSingleObject(handle, INFINITE) } {
-        WAIT_OBJECT_0 | WAIT_ABANDONED => {},
-        _ => return Ok(false)
-    }
+pub fn try_install_driver() -> Result<(), WinDivertError> {
+    let _ = MutexHandle::new()?;
 
     debug!("Opening service manager");
-    let manager = unsafe{
-        OpenSCManagerW(None, None, SC_MANAGER_ALL_ACCESS)?
-    };
-
-    if manager.is_invalid() {
-        unsafe {
-            ReleaseMutex(handle)?;
-            CloseHandle(handle)?;
-        }
-
-        return Ok(false)
-    }
+    let manager = ServiceManager::new()?;
 
     debug!("Opening windivert service");
-    let mut service_result = unsafe {
-        OpenServiceW(manager, WINDIVERT_DRIVER_NAME, SERVICE_ALL_ACCESS)
-    };
-
-    match service_result {
-        Ok(service) => {
-            debug!("Service windivert exists");
-            unsafe {
-                CloseServiceHandle(service)?;
-                CloseServiceHandle(manager)?;
-                ReleaseMutex(handle)?;
-                CloseHandle(handle)?;
+    match manager.open() {
+        Ok(Some(service)) => {
+            
+            debug!("Starting service");
+            match service.start() {
+                Ok(_) => {
+                    service.delete()?;
+                    Ok(())
+                },
+                Err(WinDivertError::ServiceAlreadyRunning) => Ok(()),
+                Err(err) => Err(err),
             }
-            return Ok(true);
-        }
-        Err(err) => {
-            let error_code = err.code();
-            if error_code == ERROR_SERVICE_DOES_NOT_EXIST.into() {
-                debug!("Service does not exist, will create it");
-            } else {
-                debug!("Unexpected error opening service: {:?}", err);
-                unsafe {
-                    CloseServiceHandle(manager)?;
-                    ReleaseMutex(handle)?;
-                    CloseHandle(handle)?;
-                }
-                return Err(err);
-            }
-        }
-    };
-
-    debug!("windivert service does not exist");
-    let driver_name = match win_divert_get_driver_file_name() {
-        Some(value) => value,
-        None => {
-            unsafe {
-                // CloseServiceHandle(service)?;
-                CloseServiceHandle(manager)?;
-                ReleaseMutex(handle)?;
-                CloseHandle(handle)?;
-            }
-
-            return Ok(false)
         },
-    };
+        Ok(None) => {
+            let args = CreateArgs::new();
+            let driver_sys_name = args.driver_sys_name;
 
-    let binary_path = {
-        let bytes = if win_divert_use_32_bit() {
-            include_bytes!("../WinDivert32.sys")
-        } else {
-            include_bytes!("../WinDivert64.sys")
-        };
+            debug!("Creating windivert service");
+            match manager.create(args) {
+                Ok(service) => {
+                    if let Err(err) = win_divert_register_event_source(driver_sys_name) {
+                        error!("Could not register event source");
+                    }
 
-        let exe_path = std::env::current_exe().ok().unwrap();
-        let dir_path = exe_path.parent().unwrap();
-        let driver_name_str = unsafe { driver_name.to_string().unwrap() };
-        let driver_path = dir_path.join(&driver_name_str);
-        let system_dir = std::env::var("SystemRoot")
-            .unwrap_or_else(|_| "C:\\Windows".to_string());
-        let driver_path = std::path::PathBuf::from(system_dir)
-            .join("System32")
-            .join(&driver_name_str);
-
-        if driver_path.exists() {
-            debug!("Found driver in {}", driver_path.display());
-        } else {
-            debug!("Creating driver in {}", driver_path.display());
-            std::fs::write(&driver_path, bytes).unwrap();
-        }
-
-        let driver_path_wide: Vec<u16> = OsStr::new(&driver_path)
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        
-        PCWSTR::from_raw(driver_path_wide.as_ptr())
-    };
-
-    debug!("Creating windivert service");
-    let mut service = unsafe {
-        CreateServiceW(manager,
-            WINDIVERT_DRIVER_NAME,
-            WINDIVERT_DRIVER_NAME,
-            SERVICE_ALL_ACCESS,
-            SERVICE_KERNEL_DRIVER,
-            SERVICE_DEMAND_START,
-            SERVICE_ERROR_NORMAL,
-            binary_path,
-            None,
-            None,
-            None,
-            None,
-            None
-        )?
-    };
-
-    let mut is_success = true;
-
-    if service.is_invalid() {
-        let error = unsafe { GetLastError() };
-        
-        if error == ERROR_SERVICE_EXISTS {
-            debug!("Invalid handle, starting service");
-            service = unsafe {
-                OpenServiceW(
-                    manager,
-                    WINDIVERT_DRIVER_NAME,
-                    SERVICE_ALL_ACCESS,
-                )
-            }?;
-        }
-
-        if !service.is_invalid() {
-            is_success = unsafe { StartServiceW(service, None).is_ok() };
-
-            if is_success {
-                debug!("Started service, marking as delete on restart");
-                unsafe { DeleteService(service)?; }
+                    debug!("Starting service");
+                    match service.start() {
+                        Ok(_) => {
+                            service.delete()?;
+                            Ok(())
+                        },
+                        Err(WinDivertError::ServiceAlreadyRunning) => Ok(()),
+                        Err(err) => Err(err),
+                    }
+                },
+                Err(WinDivertError::ServiceExists) => {
+                    match manager.open() {
+                        Ok(service) => {
+                            let service = service.ok_or_else(|| WinDivertError::CorruptedService)?;
+                            service.delete()?;
+                            Ok(())
+                        },
+                        Err(err) => Err(err),
+                    }
+                },
+                Err(err) => Err(err),
             }
-            else {
-                let error = unsafe { GetLastError() };
-                is_success = error == ERROR_SERVICE_ALREADY_RUNNING;
-            }
-        }
+        },
+        Err(err) => Err(err),
     }
-
-    debug!("Registering event soruce");
-    win_divert_register_event_source(driver_name)?;
-
-    if !service.is_invalid() {
-        debug!("Starting service");
-        is_success = unsafe { StartServiceW(service, None).is_ok() };
-
-        if is_success {
-            debug!("Started service, marking as delete on restart");
-            unsafe { DeleteService(service)?; }
-            // NtUnloadDriver(); // use ntapi::ntioapi::NtUnloadDriver;
-        }
-        else {
-            let error = unsafe { GetLastError() };
-            debug!("Could not start service, error: {}", error.0);
-            is_success = error == ERROR_SERVICE_ALREADY_RUNNING;
-        }
-    }
-
-    unsafe {
-        CloseServiceHandle(service)?;
-        CloseServiceHandle(manager)?;
-        ReleaseMutex(handle)?;
-        CloseHandle(handle)?;
-    }
-
-    Ok(is_success)
 }
 
 fn win_divert_register_event_source(windivert_sys: PCWSTR) -> windows::core::Result<()> {
