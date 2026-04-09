@@ -12,6 +12,7 @@ rust-version = "1.94"
 
 [dependencies]
 log = "0.4.18"
+ntapi = "0.4.3"
 
 [dependencies.windows]
 version = "0.62.2"

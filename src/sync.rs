@@ -1,9 +1,12 @@
 use std::{borrow::Cow, mem::{MaybeUninit, offset_of}};
 use log::*;
 use windows::{Win32::{Foundation::{CloseHandle, ERROR_FATAL_APP_EXIT, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE}, Storage::FileSystem::{CreateFile2, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_MODE, OPEN_EXISTING}, System::IO::{DeviceIoControl, OVERLAPPED}}, core::w};
-
+use std::marker::Send;
 
 use crate::{constants::*, filter::{WinDivertFilterProgram, WinDivertFilterRaw}, ioctl::*, misc::{sanity_checks, try_install_driver}, *};
+
+unsafe impl Send for Windivert {}
+unsafe impl Sync for Windivert {}
 
 // #[derive(Debug, Clone)]
 pub struct WinDivertPacket<'a> {
@@ -30,6 +33,7 @@ impl Windivert {
 
         let filter = WinDivertFilterProgram::compile(filter, layer)?;
 
+        debug!("Trying to open handle {}", unsafe { WINDIVERT_PIPE_NAME.display() });
         let handle = unsafe {
             CreateFileW(
                 WINDIVERT_PIPE_NAME,
@@ -44,12 +48,13 @@ impl Windivert {
 
         if handle.is_err() {
             let error = windows::core::Error::from_thread();
+            debug!("Got error {}, trying to install service", error.code().0);
 
             if !try_install_driver().map_err(|err| WinDivertError::CouldNotInstallService(err.code().0 as u32))? {
                 return Err(WinDivertError::Handle(error.code().0 as u32));   
             }
 
-            debug!("2nd attempt to open handle");
+            debug!("2nd attempt to open handle {}", unsafe { WINDIVERT_PIPE_NAME.display() });
             let handle = unsafe {
                 CreateFileW(
                     WINDIVERT_PIPE_NAME,
@@ -283,14 +288,19 @@ impl Windivert {
         is_success
     }
 
-    pub fn close(mut self) {
+    fn close_inner(&mut self) {
+        debug!("Closing handle");
         unsafe { CloseHandle(self.handle).ok(); }
         self.handle = HANDLE::default(); 
+    }
+
+    pub fn close(mut self) {
+        self.close_inner();
     }
 }
 
 impl Drop for Windivert {
     fn drop(&mut self) {
-        unsafe { CloseHandle(self.handle).ok(); }
+        self.close_inner();
     }
 }

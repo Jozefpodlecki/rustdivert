@@ -74,17 +74,17 @@ fn win_divert_get_driver_file_name() -> Option<PCWSTR> {
         WINDIVERT_64_SYS
     };
     
-    let exe_path = std::env::current_exe().ok()?;
-    let dir_path = exe_path.parent()?;
-    let driver_path = dir_path.join(driver_name);
+    // let exe_path = std::env::current_exe().ok()?;
+    // let dir_path = exe_path.parent()?;
+    // let driver_path = dir_path.join(driver_name);
     
-    let driver_path_wide: Vec<u16> = OsStr::new(&driver_path)
+    let driver_path_wide: Vec<u16> = OsStr::new(&driver_name)
         .encode_wide()
         .chain(Some(0))
         .collect();
-    let driver_path = PCWSTR::from_raw(driver_path_wide.as_ptr());
+    let driver_name = PCWSTR::from_raw(driver_path_wide.as_ptr());
 
-    Some(driver_path)
+    Some(driver_name)
 }
 
 pub fn try_install_driver() -> windows::core::Result<bool> {
@@ -151,7 +151,7 @@ pub fn try_install_driver() -> windows::core::Result<bool> {
     };
 
     debug!("windivert service does not exist");
-    let driver_path = match win_divert_get_driver_file_name() {
+    let driver_name = match win_divert_get_driver_file_name() {
         Some(value) => value,
         None => {
             unsafe {
@@ -165,6 +165,38 @@ pub fn try_install_driver() -> windows::core::Result<bool> {
         },
     };
 
+    let binary_path = {
+        let bytes = if win_divert_use_32_bit() {
+            include_bytes!("../WinDivert32.sys")
+        } else {
+            include_bytes!("../WinDivert64.sys")
+        };
+
+        let exe_path = std::env::current_exe().ok().unwrap();
+        let dir_path = exe_path.parent().unwrap();
+        let driver_name_str = unsafe { driver_name.to_string().unwrap() };
+        let driver_path = dir_path.join(&driver_name_str);
+        let system_dir = std::env::var("SystemRoot")
+            .unwrap_or_else(|_| "C:\\Windows".to_string());
+        let driver_path = std::path::PathBuf::from(system_dir)
+            .join("System32")
+            .join(&driver_name_str);
+
+        if driver_path.exists() {
+            debug!("Found driver in {}", driver_path.display());
+        } else {
+            debug!("Creating driver in {}", driver_path.display());
+            std::fs::write(&driver_path, bytes).unwrap();
+        }
+
+        let driver_path_wide: Vec<u16> = OsStr::new(&driver_path)
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        
+        PCWSTR::from_raw(driver_path_wide.as_ptr())
+    };
+
     debug!("Creating windivert service");
     let mut service = unsafe {
         CreateServiceW(manager,
@@ -174,7 +206,7 @@ pub fn try_install_driver() -> windows::core::Result<bool> {
             SERVICE_KERNEL_DRIVER,
             SERVICE_DEMAND_START,
             SERVICE_ERROR_NORMAL,
-            driver_path,
+            binary_path,
             None,
             None,
             None,
@@ -203,6 +235,7 @@ pub fn try_install_driver() -> windows::core::Result<bool> {
             is_success = unsafe { StartServiceW(service, None).is_ok() };
 
             if is_success {
+                debug!("Started service, marking as delete on restart");
                 unsafe { DeleteService(service)?; }
             }
             else {
@@ -213,17 +246,20 @@ pub fn try_install_driver() -> windows::core::Result<bool> {
     }
 
     debug!("Registering event soruce");
-    win_divert_register_event_source(driver_path)?;
+    win_divert_register_event_source(driver_name)?;
 
     if !service.is_invalid() {
         debug!("Starting service");
         is_success = unsafe { StartServiceW(service, None).is_ok() };
 
         if is_success {
+            debug!("Started service, marking as delete on restart");
             unsafe { DeleteService(service)?; }
+            // NtUnloadDriver(); // use ntapi::ntioapi::NtUnloadDriver;
         }
         else {
             let error = unsafe { GetLastError() };
+            debug!("Could not start service, error: {}", error.0);
             is_success = error == ERROR_SERVICE_ALREADY_RUNNING;
         }
     }

@@ -1,6 +1,97 @@
-use std::{fmt::{self, Debug, Display}, mem::ManuallyDrop};
+use std::{fmt::{self, Debug, Display}, mem::ManuallyDrop, ptr::{addr_of, addr_of_mut}};
 
 use crate::constants::*;
+
+#[derive(Debug, Default, Clone, Copy)]
+#[repr(C, packed)]
+pub struct WinDivertFilterRaw {
+    word1: u32,
+    word2: u32,
+    arg: [u32; 4],
+}
+
+impl WinDivertFilterRaw {
+
+    pub fn args(&self) -> [u32; 4] {
+        unsafe {
+            [
+                std::ptr::read_unaligned(addr_of!(self.arg[0])),
+                std::ptr::read_unaligned(addr_of!(self.arg[1])),
+                std::ptr::read_unaligned(addr_of!(self.arg[2])),
+                std::ptr::read_unaligned(addr_of!(self.arg[3])),
+            ]
+        }
+    }
+
+    pub fn is_simple_predicate(&self) -> bool {
+        self.neg() == 0 &&
+        self.arg[1] == 0 &&
+        self.arg[2] == 0 &&
+        self.arg[3] == 0
+    }
+
+    pub fn nth_arg(&self, index: usize) -> u32 {
+        unsafe { addr_of!(self.arg[index]).read_unaligned() }
+    }
+
+    pub fn set_nth_arg(&mut self, index: usize, value: u32) {
+        unsafe { addr_of_mut!(self.arg[index]).write_unaligned(value) }
+    }
+
+    pub fn set_args(&mut self, value: &[u32; 4]) {
+        for i in 0..4 {
+            unsafe {
+                std::ptr::write_unaligned(addr_of!(self.arg[i]) as *mut u32, value[i]);
+            }
+        }
+    }
+
+    pub fn reset_args(&mut self) {
+        self.arg = [0; 4];
+    }
+
+    pub fn set_field(&mut self, v: FilterField) {
+        self.word1 = (self.word1 & !0x7FF) | (v as u32 & 0x7FF);
+    }
+
+    pub fn set_test(&mut self, value: FilterTest) {
+        self.word1 = (self.word1 & !(0x1F << 11)) | ((value as u32 & 0x1F) << 11);
+    }
+
+    pub fn set_success(&mut self, v: u16) {
+        self.word1 = (self.word1 & !(0xFFFF << 16)) | ((v as u32) << 16);
+    }
+
+    pub fn set_failure(&mut self, v: u16) {
+        self.word2 = (self.word2 & !0xFFFF) | (v as u32);
+    }
+
+    pub fn set_neg(&mut self, v: u32) {
+        self.word2 = (self.word2 & !(1 << 16)) | ((v & 1) << 16);
+    }
+
+    pub fn field(&self) -> FilterField {
+        let filter = self.word1 & 0x7FF;
+        filter.into()
+    }
+
+    pub fn test(&self) -> FilterTest {
+        let test = (self.word1 >> 11) & 0x1F;
+        test.into()
+    }
+
+    pub fn success(&self) -> u16 {
+        ((self.word1 >> 16) & 0xFFFF) as u16
+    }
+
+    pub fn failure(&self) -> u16 {
+        (self.word2 & 0xFFFF) as u16
+    }
+
+    pub fn neg(&self) -> u32 {
+        (self.word2 >> 16) & 1
+    }
+}
 
 #[derive(Clone)]
 pub struct Expression {
@@ -15,7 +106,7 @@ pub struct Expression {
 impl Default for Expression {
     fn default() -> Self {
         Self {
-            data: ExpressionData::Number { val: [0; 4], neg: false },
+            data: ExpressionData::Number { values: [0; 4], neg: false },
             kind: Default::default(),
             count: 0,
             neg: false,
@@ -38,7 +129,7 @@ impl Display for Expression {
             ExpressionData::Ternary { cond, then_expr, else_expr } => {
                 write!(f, "({} ? {} : {}) [succ={}, fail={}]", cond, then_expr, else_expr, self.succ, self.fail)
             }
-            ExpressionData::Number { val, .. } => write!(f, "Number({:?}) [succ={}, fail={}]", val, self.succ, self.fail),
+            ExpressionData::Number { values, .. } => write!(f, "Number({:?}) [succ={}, fail={}]", values, self.succ, self.fail),
             ExpressionData::Var(kind) => write!(f, "Var({:?}) [succ={}, fail={}]", kind, self.succ, self.fail),
         }
     }
@@ -55,7 +146,7 @@ impl Debug for Expression {
 
         match &self.data {
             ExpressionData::Var(kind) => { debug.field("var_kind", kind); },
-            ExpressionData::Number { val, neg } => { debug.field("val", val); debug.field("val_neg", neg); },
+            ExpressionData::Number { values, neg } => { debug.field("val", values); debug.field("val_neg", neg); },
             ExpressionData::Binary { left, right } => { debug.field("left", left); debug.field("right", right); },
             ExpressionData::Ternary { cond, then_expr, else_expr } => {
                 debug.field("cond", cond);
@@ -101,9 +192,9 @@ impl Expression {
         })
     }
 
-    pub fn new_number(val: [u32; 4], neg: bool) -> Box<Self> {
+    pub fn new_number(values: [u32; 4], neg: bool) -> Box<Self> {
         Box::new(Self {
-            data: ExpressionData::Number { val, neg },
+            data: ExpressionData::Number { values, neg },
             kind: TokenKind::Number,
             count: 0,
             neg,
@@ -182,7 +273,7 @@ impl Expression {
         let var = self.data.first()?;
         if var.kind != TokenKind::True { return None; }
         let val = self.data.second()?;
-        if let Some(val_arr) = val.data.val() {
+        if let Some(val_arr) = val.data.values() {
             let value = val_arr[0];
             return Some(if value != 0 { succ } else { fail });
         }
@@ -194,7 +285,7 @@ impl Expression {
             TokenKind::Packet | TokenKind::Packet16 | TokenKind::Packet32
             | TokenKind::TcpPayload | TokenKind::TcpPayload16 | TokenKind::TcpPayload32
             | TokenKind::UdpPayload | TokenKind::UdpPayload16 | TokenKind::UdpPayload32 => {
-                self.data.val().map(|v| v[0])
+                self.data.values().map(|v| v[0])
             }
             _ => None,
         }
@@ -206,7 +297,7 @@ pub enum ExpressionData {
     Var(TokenKind),
 
     Number {
-        val: [u32; 4],
+        values: [u32; 4],
         neg: bool,
     },
 
@@ -226,7 +317,7 @@ impl std::fmt::Debug for ExpressionData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ExpressionData::Var(kind) => write!(f, "Var({:?})", kind),
-            ExpressionData::Number { val, neg } => write!(f, "Num({:?}{})", val, if *neg { " neg" } else { "" }),
+            ExpressionData::Number { values, neg } => write!(f, "Num({:?}{})", values, if *neg { " neg" } else { "" }),
             ExpressionData::Binary { left, right } => write!(f, "({:?} ?? {:?})", left, right),
             ExpressionData::Ternary { cond, then_expr, else_expr } => write!(f, "({:?} ? {:?} : {:?})", cond, then_expr, else_expr),
         }
@@ -257,9 +348,9 @@ impl ExpressionData {
         }
     }
 
-    pub fn val(&self) -> Option<&[u32; 4]> {
+    pub fn values(&self) -> Option<&[u32; 4]> {
         match self {
-            ExpressionData::Number { val, .. } => Some(val),
+            ExpressionData::Number { values, .. } => Some(values),
             _ => None,
         }
     }
@@ -413,7 +504,7 @@ impl TokenKind {
     }
 }
 
-#[repr(u32)]
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterField {
     Zero = 0,
@@ -501,7 +592,31 @@ pub enum FilterField {
     Random8 = 82,
     Random16 = 83,
     Random32 = 84,
-    Fragment = 85,
+    Fragment = 85
+}
+
+impl From<u8> for FilterField {
+    fn from(value: u8) -> Self {
+        unsafe { std::mem::transmute(value) }
+    }
+}
+
+impl From<u32> for FilterField {
+    fn from(value: u32) -> Self {
+        unsafe { std::mem::transmute(value as u8) }
+    }
+}
+
+impl From<FilterField> for u8 {
+    fn from(value: FilterField) -> Self {
+        value as u8
+    }
+}
+
+impl From<FilterField> for u32 {
+    fn from(value: FilterField) -> Self {
+        value as u32
+    }
 }
 
 impl From<TokenKind> for FilterField {
@@ -599,7 +714,7 @@ impl From<TokenKind> for FilterField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
+#[repr(u8)]
 pub enum FilterTest {
     Eq = 0,
     Neq = 1,
@@ -609,56 +724,24 @@ pub enum FilterTest {
     Geq = 5,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-#[repr(C, packed)]
-pub struct WinDivertFilterRaw {
-    pub word1: u32,
-    pub word2: u32,
-    pub arg: [u32; 4],
-}
-
-impl WinDivertFilterRaw {
-
-    pub fn set_field(&mut self, v: FilterField) {
-        self.word1 = (self.word1 & !0x7FF) | (v as u32 & 0x7FF);
-    }
-
-    pub fn set_test(&mut self, value: FilterTest) {
-        self.word1 = (self.word1 & !(0x1F << 11)) | ((value as u32 & 0x1F) << 11);
-    }
-
-    pub fn set_success(&mut self, v: u16) {
-        self.word1 = (self.word1 & !(0xFFFF << 16)) | ((v as u32) << 16);
-    }
-
-    pub fn set_failure(&mut self, v: u16) {
-        self.word2 = (self.word2 & !0xFFFF) | (v as u32);
-    }
-
-    pub fn set_neg(&mut self, v: u32) {
-        self.word2 = (self.word2 & !(1 << 16)) | ((v & 1) << 16);
-    }
-
-    pub fn field(&self) -> u32 {
-        self.word1 & 0x7FF
-    }
-
-    pub fn test(&self) -> FilterTest {
-        unsafe { std::mem::transmute((self.word1 >> 11) & 0x1F) }
-    }
-
-    pub fn success(&self) -> u16 {
-        ((self.word1 >> 16) & 0xFFFF) as u16
-    }
-
-    pub fn failure(&self) -> u16 {
-        (self.word2 & 0xFFFF) as u16
-    }
-
-    pub fn neg(&self) -> u32 {
-        (self.word2 >> 16) & 1
+impl From<FilterTest> for u8 {
+    fn from(value: FilterTest) -> Self {
+        value as u8
     }
 }
+
+impl From<FilterTest> for u32 {
+    fn from(value: FilterTest) -> Self {
+        value as u32
+    }
+}
+
+impl From<u32> for FilterTest {
+    fn from(value: u32) -> Self {
+        unsafe { std::mem::transmute(value as u8) }
+    }
+}
+
 
 pub struct VarInfo {
     pub var_type: TokenKind,
@@ -810,7 +893,7 @@ impl VarInfo {
 
     pub fn compare(&self, kind: TokenKind, val: &Expression) -> Option<bool> {
         let val_arr = match &val.data {
-            ExpressionData::Number { val: arr, neg } => (*arr, *neg),
+            ExpressionData::Number { values: arr, neg } => (*arr, *neg),
             _ => return None,
         };
 

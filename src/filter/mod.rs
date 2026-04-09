@@ -4,6 +4,7 @@ mod parser;
 mod flattener;
 mod emitter;
 mod analyse;
+mod serde;
 mod types;
 
 pub use token::*;

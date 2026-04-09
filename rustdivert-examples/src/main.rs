@@ -1,10 +1,11 @@
-use std::time::Duration;
+
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow};
 use etherparse::{PacketHeaders, SlicedPacket};
 use flexi_logger::Logger;
-use rustdivert::{WinDivertFlags, Windivert};
-use tokio::time::sleep;
+use rustdivert::{WinDivertFlags, sync::Windivert};
+use tokio::{signal, sync::Mutex, time::sleep};
 use crate::{client::Client, server::Server};
 use log::*;
 
@@ -15,33 +16,76 @@ mod examples;
 async fn run_using_rustdivert() -> Result<()> {
     info!("Running example using rustdivert");
 
-    // $env:RUST_BACKTRACE=1
-    // Start-Process powershell -Verb runAs -ArgumentList "-NoExit", "-Command", "Set-Location '$pwd'; `$env:RUST_BACKTRACE='1'; cargo run"
-
     let mut server = Server::new();
-
     let port = 53124;
     let addr = "127.0.0.1:53124";
     server.start(addr)?;
 
-    let layer = rustdivert::WinDivertLayer::Network;
-    // let filter = format!("ip && tcp && tcp.DstPort == {}", port);
     let filter = format!("ip && tcp");
-    // let filter = format!("ip && tcp && loopback && (tcp.SrcPort == {} || tcp.DstPort == {})", port, port);
-    
     info!("Windivert filter: \"{filter}\"");
+    
     let priority = 0;
     let flags = WinDivertFlags::new().set_sniff();
-    let windivert = Windivert::open(layer, &filter, priority, flags)?;
+    let windivert = Arc::new(Mutex::new(Some(Windivert::open(
+        rustdivert::WinDivertLayer::Network, 
+        &filter, 
+        priority, 
+        flags
+    )?)));
 
-    loop {
-        let mut buffer = [0u8; 65535];
-        info!("Receiving");
-        let result = windivert.recv(&mut buffer)?;
-        info!("Received");
-        sleep(Duration::from_secs(1)).await;
-    }
+    let windivert_clone = windivert.clone();
     
+    // Handle Ctrl+C
+    let ctrl_c_task = tokio::spawn(async move {
+        match signal::ctrl_c().await {
+            Ok(()) => {
+                info!("Received Ctrl+C, shutting down...");
+                // Close WinDivert handle
+                let mut guard = windivert_clone.lock().await;
+                if let Some(w) = guard.take() {
+                    drop(w);
+                    info!("WinDivert handle closed");
+                }
+                std::process::exit(0);
+            }
+            Err(e) => {
+                error!("Unable to listen for shutdown signal: {}", e);
+            }
+        }
+    });
+
+    // Main packet processing loop
+    let processing_task = tokio::spawn(async move {
+        loop {
+            let mut buffer = [0u8; 65535];
+            info!("Receiving");
+            
+            let result = {
+                let guard = windivert.lock().await;
+                if let Some(w) = guard.as_ref() {
+                    w.recv(&mut buffer)
+                } else {
+                    info!("WinDivert closed, exiting loop");
+                    break;
+                }
+            };
+            
+            match result {
+                Ok(_) => info!("Received"),
+                Err(e) => {
+                    error!("Receive error: {}", e);
+                    break;
+                }
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    });
+
+    tokio::select! {
+        _ = ctrl_c_task => {},
+        _ = processing_task => {},
+    }
+
     Ok(())
 }
 
@@ -70,6 +114,8 @@ async fn run_using_windivert_crate() -> Result<()> {
     let flags = windivert::prelude::WinDivertFlags::new().set_sniff();
     let windivert = windivert::WinDivert::network(filter, priority, flags)?;
     // 2147942487 decimal = 0x80070057
+    // windivert.close(action);
+
     loop {
         let mut buffer = [0u8; 65535];
         info!("Receiving");

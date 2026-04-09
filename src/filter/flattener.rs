@@ -80,8 +80,8 @@ mod tests {
             } else {
                 panic!("Expected Var, got {:?}", left.data);
             }
-            if let ExpressionData::Number { val, .. } = &right.data {
-                assert_eq!(val[0], expected_val);
+            if let ExpressionData::Number { values, .. } = &right.data {
+                assert_eq!(values[0], expected_val);
             } else {
                 panic!("Expected Number, got {:?}", right.data);
             }

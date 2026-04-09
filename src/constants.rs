@@ -27,8 +27,8 @@ macro_rules! ansi_string {
 
 pub const EVENTLOG_REGISTRY_PATH: PCSTR = ansi_string!(r#"System\CurrentControlSet\Services\EventLog\System\WinDivert"#);
 
-pub const WINDIVERT_32_SYS: &str = "windivert32.sys";
-pub const WINDIVERT_64_SYS: &str = "windivert64.sys";
+pub const WINDIVERT_32_SYS: &str = "WinDivert32.sys";
+pub const WINDIVERT_64_SYS: &str = "WinDivert64.sys";
 
 pub const WINDIVERT_DRIVER_NAME: PCWSTR = PCWSTR::from_raw(&[
     'W' as u16, 'i' as u16, 'n' as u16, 'D' as u16, 'i' as u16,

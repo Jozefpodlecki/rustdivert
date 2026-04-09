@@ -1,15 +1,11 @@
 use crate::filter::{Expression, ExpressionData, TokenKind, WinDivertFilterRaw, FilterField, FilterTest};
 use crate::constants::*;
 
-pub struct Emitter {
-    kind_to_field: fn(TokenKind) -> FilterField,
-}
+pub struct Emitter;
 
 impl Emitter {
     pub fn new() -> Self {
-        Self {
-            kind_to_field: TokenKind::into,
-        }
+        Self {}
     }
 
     pub fn emit(&self, label: i16, cfg: Vec<Expression>) -> Vec<WinDivertFilterRaw> {
@@ -18,7 +14,7 @@ impl Emitter {
             object.set_field(FilterField::Zero);
             object.set_test(FilterTest::Eq);
             object.set_neg(0);
-            object.arg = [0, 0, 0, 0];
+            object.reset_args();
             object.set_success(label as u16);
             object.set_failure(label as u16);
             return vec![object];
@@ -52,12 +48,13 @@ impl Emitter {
             ExpressionData::Var(kind) => *kind,
             _ => panic!("Expected Var"),
         };
-        object.set_field((self.kind_to_field)(field_kind));
+        
+        object.set_field(field_kind.into());
         
         match &val.data {
-            ExpressionData::Number { val, neg } => {
+            ExpressionData::Number { values, neg } => {
                 object.set_neg(if *neg { 1 } else { 0 });
-                object.arg = *val;
+                object.set_args(values);
             }
             _ => panic!("Expected Number"),
         }
@@ -66,8 +63,9 @@ impl Emitter {
             TokenKind::Packet | TokenKind::Packet16 | TokenKind::Packet32 |
             TokenKind::TcpPayload | TokenKind::TcpPayload16 | TokenKind::TcpPayload32 |
             TokenKind::UdpPayload | TokenKind::UdpPayload16 | TokenKind::UdpPayload32 => {
-                if let ExpressionData::Number { val, .. } = &var.data {
-                    object.arg[1] = val[0];
+                if let ExpressionData::Number { values, .. } = &var.data {
+                    // object.arg[1] = val[0];
+                    object.set_nth_arg(1, values[0]);
                 }
             }
             _ => {}

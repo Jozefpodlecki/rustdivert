@@ -107,21 +107,23 @@ impl Analyser {
             return false;
         }
         
-        if filter.field() != field as u32 {
+        if filter.field() != field {
             return true;
         }
         
-        if filter.neg() != 0 || filter.arg[1] != 0 || filter.arg[2] != 0 || filter.arg[3] != 0 {
+        if !filter.is_simple_predicate() {
             return true;
         }
         
+        let first_arg = filter.nth_arg(0);
+
         let test_result = match filter.test() {
-            FilterTest::Eq => arg == filter.arg[0],
-            FilterTest::Neq => arg != filter.arg[0],
-            FilterTest::Lt => arg < filter.arg[0],
-            FilterTest::Leq => arg <= filter.arg[0],
-            FilterTest::Gt => arg > filter.arg[0],
-            FilterTest::Geq => arg >= filter.arg[0],
+            FilterTest::Eq => arg == first_arg,
+            FilterTest::Neq => arg != first_arg,
+            FilterTest::Lt => arg < first_arg,
+            FilterTest::Leq => arg <= first_arg,
+            FilterTest::Gt => arg > first_arg,
+            FilterTest::Geq => arg >= first_arg,
         };
         
         if test_result { result_succ } else { result_fail }
